@@ -61,6 +61,17 @@ static int parse_algo(const char *s) {
     return ALGO_NONE;
 }
 
+static bool is_valid_number_line(const char *line) {
+    const char *p = line;
+    while (*p && isspace((unsigned char)*p)) p++;
+    if (*p == '\0') return false;
+    if (*p == '-') p++;
+    if (!isdigit((unsigned char)*p)) return false;
+    long v = strtol(line, NULL, 10);
+    if (v < 0 || v >= LOGICAL_MAX) return false;
+    return true;
+}
+
 int main(int argc, char *argv[]) {
     if (argc != 4) {
         fprintf(stderr, "Uso: %s <arquivo_enderecos> <fifo|lru> <fifo|lru>\n", argv[0]);
@@ -77,5 +88,43 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     printf("args ok: page=%s tlb=%s\n", argv[2], argv[3]);
+    
+        FILE *in = fopen(argv[1], "r");
+    if (!in) {
+        fprintf(stderr, "Erro: nao foi possivel abrir o arquivo '%s'.\n", argv[1]);
+        return 1;
+    }
+
+    unsigned int *addresses = NULL;
+    size_t count = 0, capacity = 0;
+    char line[256];
+    while (fgets(line, sizeof(line), in)) {
+        if (!is_valid_number_line(line)) {
+            fprintf(stderr, "Erro: linha invalida no arquivo de enderecos: '%s'\n", line);
+            free(addresses);
+            fclose(in);
+            return 1;
+        }
+        long v = strtol(line, NULL, 10);
+        if (count == capacity) {
+            capacity = capacity ? capacity * 2 : 64;
+            unsigned int *tmp = realloc(addresses, capacity * sizeof(unsigned int));
+            if (!tmp) { free(addresses); fclose(in); fprintf(stderr, "Erro: realloc.\n"); return 1; }
+            addresses = tmp;
+        }
+        addresses[count++] = (unsigned int)v;
+    }
+    fclose(in);
+
+    if (count == 0) {
+        fprintf(stderr, "Erro: arquivo de enderecos vazio.\n");
+        free(addresses);
+        return 1;
+    }
+
+    printf("lidos %zu enderecos\n", count);
+    free(addresses);
+    return 0;
+
     return 0;
 }

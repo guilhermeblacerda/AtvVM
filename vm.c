@@ -47,3 +47,35 @@ static unsigned long tlb_misses = 0;
 static int page_algo = ALGO_NONE;
 static int tlb_algo = ALGO_NONE;
 static FILE *out = NULL;
+
+#include <string.h>
+#include <ctype.h>
+
+static int parse_algo(const char *s) {
+    char buf[16];
+    size_t n = strlen(s);
+    if (n >= sizeof(buf)) return ALGO_NONE;
+    for (size_t i = 0; i <= n; i++) buf[i] = (char)tolower((unsigned char)s[i]);
+    if (strcmp(buf, "fifo") == 0) return ALGO_FIFO;
+    if (strcmp(buf, "lru") == 0) return ALGO_LRU;
+    return ALGO_NONE;
+}
+
+int main(int argc, char *argv[]) {
+    if (argc != 4) {
+        fprintf(stderr, "Uso: %s <arquivo_enderecos> <fifo|lru> <fifo|lru>\n", argv[0]);
+        return 1;
+    }
+    page_algo = parse_algo(argv[2]);
+    tlb_algo = parse_algo(argv[3]);
+    if (page_algo == ALGO_NONE) {
+        fprintf(stderr, "Erro: algoritmo de pagina invalido (%s). Use fifo ou lru.\n", argv[2]);
+        return 1;
+    }
+    if (tlb_algo == ALGO_NONE) {
+        fprintf(stderr, "Erro: algoritmo de TLB invalido (%s). Use fifo ou lru.\n", argv[3]);
+        return 1;
+    }
+    printf("args ok: page=%s tlb=%s\n", argv[2], argv[3]);
+    return 0;
+}

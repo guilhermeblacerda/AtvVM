@@ -72,6 +72,35 @@ static bool is_valid_number_line(const char *line) {
     return true;
 }
 
+static void init_all(void) {
+    for (int i = 0; i < PAGE_TABLE_SIZE; i++) {
+        page_table[i].frame = -1;
+        page_table[i].valid = false;
+        page_table[i].last_use = 0;
+    }
+    for (int i = 0; i < TLB_SIZE; i++) {
+        tlb.entries[i].page = -1;
+        tlb.entries[i].frame = -1;
+        tlb.entries[i].valid = false;
+        tlb.entries[i].last_use = 0;
+        tlb.fifo_order[i] = -1;
+    }
+    tlb.fifo_head = 0;
+    tlb.fifo_count = 0;
+    for (int i = 0; i < NUM_FRAMES; i++) {
+        frame_used[i] = false;
+        for (int j = 0; j < FRAME_SIZE; j++) physical_memory[i][j] = 0;
+        page_fifo[i] = -1;
+    }
+    next_free_frame = 0;
+    page_fifo_head = 0;
+    page_fifo_count = 0;
+    clock_counter = 0;
+    page_faults = 0;
+    tlb_hits = 0;
+    tlb_misses = 0;
+}
+
 int main(int argc, char *argv[]) {
     if (argc != 4) {
         fprintf(stderr, "Uso: %s <arquivo_enderecos> <fifo|lru> <fifo|lru>\n", argv[0]);
@@ -121,6 +150,8 @@ int main(int argc, char *argv[]) {
         free(addresses);
         return 1;
     }
+
+    init_all();
 
     printf("lidos %zu enderecos\n", count);
     free(addresses);

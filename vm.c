@@ -143,6 +143,62 @@ static int tlb_lookup(int page, int *hit_index) {
     return frame;
 }
 
+static void tlb_fifo_push(int index) {
+    int slot = (tlb.fifo_head + tlb.fifo_count) % TLB_SIZE;
+    tlb.fifo_order[slot] = index;
+    if (tlb.fifo_count < TLB_SIZE) tlb.fifo_count++;
+    else tlb.fifo_head = (tlb.fifo_head + 1) % TLB_SIZE;
+}
+
+static void tlb_fifo_remove_index(int index) {
+    int new_order[TLB_SIZE];
+    int n = 0;
+    for (int i = 0; i < tlb.fifo_count; i++) {
+        int idx = tlb.fifo_order[(tlb.fifo_head + i) % TLB_SIZE];
+        if (idx != index) new_order[n++] = idx;
+    }
+    tlb.fifo_head = 0;
+    tlb.fifo_count = n;
+    for (int i = 0; i < n; i++) tlb.fifo_order[i] = new_order[i];
+}
+
+static void tlb_insert(int page, int frame) {
+    int victim = -1;
+    for (int i = 0; i < TLB_SIZE; i++) {
+        if (!tlb.entries[i].valid) { victim = i; break; }
+    }
+    if (victim == -1) {
+        if (tlb_algo == ALGO_FIFO) {
+            victim = tlb.fifo_order[tlb.fifo_head];
+            tlb_fifo_remove_index(victim);
+        } else {
+            unsigned long oldest = (unsigned long)-1;
+            victim = 0;
+            for (int i = 0; i < TLB_SIZE; i++) {
+                if (tlb.entries[i].last_use < oldest) {
+                    oldest = tlb.entries[i].last_use;
+                    victim = i;
+                }
+            }
+        }
+    }
+    tlb.entries[victim].page = page;
+    tlb.entries[victim].frame = frame;
+    tlb.entries[victim].valid = true;
+    clock_counter++;
+    tlb.entries[victim].last_use = clock_counter;
+    if (tlb_algo == ALGO_FIFO) tlb_fifo_push(victim);
+}
+
+static void tlb_touch(int index) {
+    clock_counter++;
+    tlb.entries[index].last_use = clock_counter;
+    if (tlb_algo == ALGO_FIFO) {
+        tlb_fifo_remove_index(index);
+        tlb_fifo_push(index);
+    }
+}
+
 int main(int argc, char *argv[]) {
     if (argc != 4) {
         fprintf(stderr, "Uso: %s <arquivo_enderecos> <fifo|lru> <fifo|lru>\n", argv[0]);

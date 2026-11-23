@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <pthread.h>
 
 #define TLB_SIZE 16
 #define PAGE_TABLE_SIZE 256
@@ -31,6 +32,14 @@ typedef struct {
     int fifo_head;
     int fifo_count;
 } TLB;
+
+typedef struct {
+    TLB *tlb;
+    int page;
+    int index;
+    int found;
+    int frame;
+} TlbSearchArg;
 
 static PageTableEntry page_table[PAGE_TABLE_SIZE];
 static TLB tlb;
@@ -99,6 +108,39 @@ static void init_all(void) {
     page_faults = 0;
     tlb_hits = 0;
     tlb_misses = 0;
+}
+
+static void *tlb_search_worker(void *p) {
+    TlbSearchArg *a = (TlbSearchArg *)p;
+    TLBEntry *e = &a->tlb->entries[a->index];
+    if (e->valid && e->page == a->page) {
+        a->found = 1;
+        a->frame = e->frame;
+    }
+    return NULL;
+}
+
+static int tlb_lookup(int page, int *hit_index) {
+    pthread_t threads[TLB_SIZE];
+    TlbSearchArg args[TLB_SIZE];
+    for (int i = 0; i < TLB_SIZE; i++) {
+        args[i].tlb = &tlb;
+        args[i].page = page;
+        args[i].index = i;
+        args[i].found = 0;
+        args[i].frame = -1;
+        pthread_create(&threads[i], NULL, tlb_search_worker, &args[i]);
+    }
+    int frame = -1;
+    *hit_index = -1;
+    for (int i = 0; i < TLB_SIZE; i++) {
+        pthread_join(threads[i], NULL);
+        if (args[i].found && frame == -1) {
+            frame = args[i].frame;
+            *hit_index = i;
+        }
+    }
+    return frame;
 }
 
 int main(int argc, char *argv[]) {

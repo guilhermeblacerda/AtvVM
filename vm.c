@@ -199,6 +199,85 @@ static void tlb_touch(int index) {
     }
 }
 
+static int pick_page_victim(void) {
+    if (page_algo == ALGO_FIFO) {
+        int f = page_fifo[page_fifo_head];
+        page_fifo_head = (page_fifo_head + 1) % NUM_FRAMES;
+        page_fifo_count--;
+        return f;
+    }
+    int victim_frame = -1;
+    unsigned long oldest = (unsigned long)-1;
+    for (int p = 0; p < PAGE_TABLE_SIZE; p++) {
+        if (!page_table[p].valid) continue;
+        if (page_table[p].last_use < oldest) {
+            oldest = page_table[p].last_use;
+            victim_frame = page_table[p].frame;
+        }
+    }
+    return victim_frame;
+}
+
+static void page_fifo_push(int frame) {
+    int slot = (page_fifo_head + page_fifo_count) % NUM_FRAMES;
+    page_fifo[slot] = frame;
+    page_fifo_count++;
+}
+
+static void page_fifo_remove_frame(int frame) {
+    int tmp[NUM_FRAMES];
+    int n = 0;
+    for (int i = 0; i < page_fifo_count; i++) {
+        int f = page_fifo[(page_fifo_head + i) % NUM_FRAMES];
+        if (f != frame) tmp[n++] = f;
+    }
+    page_fifo_head = 0;
+    page_fifo_count = n;
+    for (int i = 0; i < n; i++) page_fifo[i] = tmp[i];
+}
+
+static int handle_page_fault(int page) {
+    int frame = -1;
+    if (next_free_frame < NUM_FRAMES) {
+        frame = next_free_frame++;
+        frame_used[frame] = true;
+    } else {
+        frame = pick_page_victim();
+        for (int p = 0; p < PAGE_TABLE_SIZE; p++) {
+            if (page_table[p].valid && page_table[p].frame == frame) {
+                page_table[p].valid = false;
+                page_table[p].frame = -1;
+                break;
+            }
+        }
+    }
+    page_table[page].frame = frame;
+    page_table[page].valid = true;
+    clock_counter++;
+    page_table[page].last_use = clock_counter;
+    if (page_algo == ALGO_FIFO) {
+        if (next_free_frame <= NUM_FRAMES && page_fifo_count < NUM_FRAMES) {
+            page_fifo_push(frame);
+        } else {
+            page_fifo_remove_frame(frame);
+            page_fifo_push(frame);
+        }
+    }
+    for (int i = 0; i < FRAME_SIZE; i++) physical_memory[frame][i] = 0;
+    page_faults++;
+    return frame;
+}
+
+static void page_touch(int page) {
+    clock_counter++;
+    page_table[page].last_use = clock_counter;
+    if (page_algo == ALGO_FIFO) {
+        int f = page_table[page].frame;
+        page_fifo_remove_frame(f);
+        page_fifo_push(f);
+    }
+}
+
 int main(int argc, char *argv[]) {
     if (argc != 4) {
         fprintf(stderr, "Uso: %s <arquivo_enderecos> <fifo|lru> <fifo|lru>\n", argv[0]);

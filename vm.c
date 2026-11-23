@@ -278,6 +278,32 @@ static void page_touch(int page) {
     }
 }
 
+static void process_address(unsigned int logical) {
+    int page = (int)(logical >> 8);
+    int offset = (int)(logical & 0xFF);
+    int tlb_index = -1;
+    int frame = tlb_lookup(page, &tlb_index);
+    signed char value;
+
+    if (frame != -1) {
+        tlb_hits++;
+        value = physical_memory[frame][offset];
+        tlb_touch(tlb_index);
+    } else {
+        tlb_misses++;
+        if (!page_table[page].valid) {
+            frame = handle_page_fault(page);
+        } else {
+            frame = page_table[page].frame;
+            page_touch(page);
+        }
+        tlb_insert(page, frame);
+        value = physical_memory[frame][offset];
+    }
+
+    fprintf(out, "Endereco virtual: %u, Valor: %d\n", logical, (int)value);
+}
+
 int main(int argc, char *argv[]) {
     if (argc != 4) {
         fprintf(stderr, "Uso: %s <arquivo_enderecos> <fifo|lru> <fifo|lru>\n", argv[0]);
@@ -330,9 +356,30 @@ int main(int argc, char *argv[]) {
 
     init_all();
 
-    printf("lidos %zu enderecos\n", count);
+    out = fopen("correct.txt", "w");
+    if (!out) {
+        free(addresses);
+        fprintf(stderr, "Erro: nao foi possivel criar correct.txt\n");
+        return 1;
+    }
+
+    init_all();
+
+    for (size_t i = 0; i < count; i++) {
+        process_address(addresses[i]);
+    }
+
+    fprintf(out, "\nEstatisticas:\n");
+    fprintf(out, "Page faults: %lu\n", page_faults);
+    fprintf(out, "TLB hits: %lu\n", tlb_hits);
+    fprintf(out, "TLB misses: %lu\n", tlb_misses);
+
+    fclose(out);
     free(addresses);
+
+    printf("Execucao concluida. Saida em correct.txt\n");
+    printf("Page faults: %lu | TLB hits: %lu | TLB misses: %lu\n",
+           page_faults, tlb_hits, tlb_misses);
     return 0;
 
-    return 0;
 }

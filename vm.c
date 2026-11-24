@@ -2,11 +2,14 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <pthread.h>
+#include <string.h>
+#include <ctype.h>
 
 #define TLB_SIZE 16
 #define PAGE_TABLE_SIZE 256
 #define FRAME_SIZE 256
-#define NUM_FRAMES 128
+#define MAX_FRAMES 256
+#define DEFAULT_FRAMES 128
 #define LOGICAL_MAX 65536
 
 #define ALGO_NONE -1
@@ -28,9 +31,7 @@ typedef struct {
 
 typedef struct {
     TLBEntry entries[TLB_SIZE];
-    int fifo_order[TLB_SIZE];
     int fifo_head;
-    int fifo_count;
 } TLB;
 
 typedef struct {
@@ -43,11 +44,11 @@ typedef struct {
 
 static PageTableEntry page_table[PAGE_TABLE_SIZE];
 static TLB tlb;
-static signed char physical_memory[NUM_FRAMES][FRAME_SIZE];
+static signed char physical_memory[MAX_FRAMES][FRAME_SIZE];
 static signed char backing_store[PAGE_TABLE_SIZE][FRAME_SIZE];
-static bool frame_used[NUM_FRAMES];
+static bool frame_used[MAX_FRAMES];
 static int next_free_frame = 0;
-static int page_fifo[NUM_FRAMES];
+static int page_fifo[MAX_FRAMES];
 static int page_fifo_head = 0;
 static int page_fifo_count = 0;
 static unsigned long clock_counter = 0;
@@ -59,8 +60,9 @@ static int page_algo = ALGO_NONE;
 static int tlb_algo = ALGO_NONE;
 static FILE *out = NULL;
 
-#include <string.h>
-#include <ctype.h>
+static int num_frames = DEFAULT_FRAMES;
+static int use_tlb = 1;
+static int use_threads = 1;
 
 static int parse_algo(const char *s) {
     char buf[16];
@@ -109,11 +111,9 @@ static void init_all(void) {
         tlb.entries[i].frame = -1;
         tlb.entries[i].valid = false;
         tlb.entries[i].last_use = 0;
-        tlb.fifo_order[i] = -1;
     }
     tlb.fifo_head = 0;
-    tlb.fifo_count = 0;
-    for (int i = 0; i < NUM_FRAMES; i++) {
+    for (int i = 0; i < MAX_FRAMES; i++) {
         frame_used[i] = false;
         for (int j = 0; j < FRAME_SIZE; j++) physical_memory[i][j] = 0;
         page_fifo[i] = -1;
@@ -121,15 +121,47 @@ static void init_all(void) {
     next_free_frame = 0;
     page_fifo_head = 0;
     page_fifo_count = 0;
-    clock_counter = 0;
-    tlb_clock = 0; 
+    clock_counter = 1;
+    tlb_clock = 1;
     page_faults = 0;
     tlb_hits = 0;
     tlb_misses = 0;
 }
 
+static void *tlb_search_worker(void *p) {
+    TlbSearchArg *a = (TlbSearchArg *)p;
+    TLBEntry *e = &a->tlb->entries[a->index];
+    if (e->valid && e->page == a->page) {
+        a->found = 1;
+        a->frame = e->frame;
+    }
+    return NULL;
+}
 
-static int tlb_lookup(int page, int *hit_index) {
+static int tlb_lookup_threaded(int page, int *hit_index) {
+    pthread_t threads[TLB_SIZE];
+    TlbSearchArg args[TLB_SIZE];
+    for (int i = 0; i < TLB_SIZE; i++) {
+        args[i].tlb = &tlb;
+        args[i].page = page;
+        args[i].index = i;
+        args[i].found = 0;
+        args[i].frame = -1;
+        pthread_create(&threads[i], NULL, tlb_search_worker, &args[i]);
+    }
+    int frame = -1;
+    *hit_index = -1;
+    for (int i = 0; i < TLB_SIZE; i++) {
+        pthread_join(threads[i], NULL);
+        if (args[i].found && frame == -1) {
+            frame = args[i].frame;
+            *hit_index = i;
+        }
+    }
+    return frame;
+}
+
+static int tlb_lookup_seq(int page, int *hit_index) {
     for (int i = 0; i < TLB_SIZE; i++) {
         if (tlb.entries[i].valid && tlb.entries[i].page == page) {
             *hit_index = i;
@@ -140,14 +172,35 @@ static int tlb_lookup(int page, int *hit_index) {
     return -1;
 }
 
+static int tlb_lookup(int page, int *hit_index) {
+    if (!use_tlb) {
+        *hit_index = -1;
+        return -1;
+    }
+    return use_threads ? tlb_lookup_threaded(page, hit_index)
+                       : tlb_lookup_seq(page, hit_index);
+}
+
 static void tlb_insert(int page, int frame) {
+    if (!use_tlb) return;
     int victim = -1;
     for (int i = 0; i < TLB_SIZE; i++) {
         if (!tlb.entries[i].valid) { victim = i; break; }
     }
     if (victim == -1) {
-        victim = tlb.fifo_head;
-        tlb.fifo_head = (tlb.fifo_head + 1) % TLB_SIZE;
+        if (tlb_algo == ALGO_FIFO) {
+            victim = tlb.fifo_head;
+            tlb.fifo_head = (tlb.fifo_head + 1) % TLB_SIZE;
+        } else {
+            unsigned long oldest = (unsigned long)-1;
+            victim = 0;
+            for (int i = 0; i < TLB_SIZE; i++) {
+                if (tlb.entries[i].last_use < oldest) {
+                    oldest = tlb.entries[i].last_use;
+                    victim = i;
+                }
+            }
+        }
     }
     tlb.entries[victim].page = page;
     tlb.entries[victim].frame = frame;
@@ -157,6 +210,7 @@ static void tlb_insert(int page, int frame) {
 }
 
 static void tlb_touch(int index) {
+    if (!use_tlb) return;
     tlb_clock++;
     tlb.entries[index].last_use = tlb_clock;
 }
@@ -164,31 +218,43 @@ static void tlb_touch(int index) {
 static int pick_page_victim(void) {
     if (page_algo == ALGO_FIFO) {
         int f = page_fifo[page_fifo_head];
-        page_fifo_head = (page_fifo_head + 1) % NUM_FRAMES;
+        page_fifo_head = (page_fifo_head + 1) % num_frames;
         page_fifo_count--;
         return f;
     }
+
     int victim_frame = -1;
     unsigned long oldest = (unsigned long)-1;
-    for (int p = 0; p < PAGE_TABLE_SIZE; p++) {
-        if (!page_table[p].valid) continue;
-        if (page_table[p].last_use < oldest) {
-            oldest = page_table[p].last_use;
-            victim_frame = page_table[p].frame;
+
+    for (int f = 0; f < num_frames; f++) {
+        if (!frame_used[f]) continue;
+
+        int page = -1;
+        for (int p = 0; p < PAGE_TABLE_SIZE; p++) {
+            if (page_table[p].valid && page_table[p].frame == f) {
+                page = p;
+                break;
+            }
+        }
+        if (page == -1) continue;
+
+        if (page_table[page].last_use < oldest) {
+            oldest = page_table[page].last_use;
+            victim_frame = f;
         }
     }
     return victim_frame;
 }
 
 static void page_fifo_push(int frame) {
-    int slot = (page_fifo_head + page_fifo_count) % NUM_FRAMES;
+    int slot = (page_fifo_head + page_fifo_count) % num_frames;
     page_fifo[slot] = frame;
     page_fifo_count++;
 }
 
 static int handle_page_fault(int page) {
     int frame = -1;
-    if (next_free_frame < NUM_FRAMES) {
+    if (next_free_frame < num_frames) {
         frame = next_free_frame++;
         frame_used[frame] = true;
     } else {
@@ -197,6 +263,11 @@ static int handle_page_fault(int page) {
             if (page_table[p].valid && page_table[p].frame == frame) {
                 page_table[p].valid = false;
                 page_table[p].frame = -1;
+                /* CORRECAO 1: invalida a entrada da TLB da pagina despejada */
+                for (int t = 0; t < TLB_SIZE; t++) {
+                    if (tlb.entries[t].valid && tlb.entries[t].page == p)
+                        tlb.entries[t].valid = false;
+                }
                 break;
             }
         }
@@ -208,7 +279,7 @@ static int handle_page_fault(int page) {
     if (page_algo == ALGO_FIFO) {
         page_fifo_push(frame);
     }
-    for (int i = 0; i < FRAME_SIZE; i++){
+    for (int i = 0; i < FRAME_SIZE; i++) {
         physical_memory[frame][i] = backing_store[page][i];
     }
     page_faults++;
@@ -231,7 +302,7 @@ static void process_address(unsigned int logical) {
         tlb_hits++;
         value = physical_memory[frame][offset];
         tlb_touch(tlb_index);
-        page_touch(page);
+        page_touch(page);   /* CORRECAO 2: acerto na TLB tambem conta como uso da pagina (LRU) */
     } else {
         tlb_misses++;
         if (!page_table[page].valid) {
@@ -246,10 +317,12 @@ static void process_address(unsigned int logical) {
 
     int physical = frame * FRAME_SIZE + offset;
     int slot_in_tlb = -1;
-    for (int i = 0; i < TLB_SIZE; i++) {
-        if (tlb.entries[i].valid && tlb.entries[i].page == page) {
-            slot_in_tlb = i;
-            break;
+    if (use_tlb) {
+        for (int i = 0; i < TLB_SIZE; i++) {
+            if (tlb.entries[i].valid && tlb.entries[i].page == page) {
+                slot_in_tlb = i;
+                break;
+            }
         }
     }
     fprintf(out, "Virtual address: %u TLB: %d Physical address: %d Value: %d\n",
@@ -257,6 +330,10 @@ static void process_address(unsigned int logical) {
 }
 
 int main(int argc, char *argv[]) {
+    if (getenv("VM_NOTLB") != NULL)    use_tlb = 0;
+    if (getenv("VM_NOTHREAD") != NULL) use_threads = 0;
+    if (getenv("VM_256") != NULL)      num_frames = 256;
+
     if (argc != 4) {
         fprintf(stderr, "Uso: %s <arquivo_enderecos> <fifo|lru> <fifo|lru>\n", argv[0]);
         return 1;
@@ -271,9 +348,8 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "Erro: algoritmo de TLB invalido (%s). Use fifo ou lru.\n", argv[3]);
         return 1;
     }
-    printf("args ok: page=%s tlb=%s\n", argv[2], argv[3]);
-    
-        FILE *in = fopen(argv[1], "r");
+
+    FILE *in = fopen(argv[1], "r");
     if (!in) {
         fprintf(stderr, "Erro: nao foi possivel abrir o arquivo '%s'.\n", argv[1]);
         return 1;
@@ -333,5 +409,4 @@ int main(int argc, char *argv[]) {
     printf("Page faults: %lu | TLB hits: %lu | TLB misses: %lu\n",
            page_faults, tlb_hits, tlb_misses);
     return 0;
-
 }

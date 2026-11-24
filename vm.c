@@ -263,7 +263,6 @@ static int handle_page_fault(int page) {
             if (page_table[p].valid && page_table[p].frame == frame) {
                 page_table[p].valid = false;
                 page_table[p].frame = -1;
-                /* CORRECAO 1: invalida a entrada da TLB da pagina despejada */
                 for (int t = 0; t < TLB_SIZE; t++) {
                     if (tlb.entries[t].valid && tlb.entries[t].page == p)
                         tlb.entries[t].valid = false;
@@ -302,7 +301,7 @@ static void process_address(unsigned int logical) {
         tlb_hits++;
         value = physical_memory[frame][offset];
         tlb_touch(tlb_index);
-        page_touch(page);   /* CORRECAO 2: acerto na TLB tambem conta como uso da pagina (LRU) */
+        page_touch(page);
     } else {
         tlb_misses++;
         if (!page_table[page].valid) {

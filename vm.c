@@ -404,8 +404,13 @@ int main(int argc, char *argv[]) {
     fclose(out);
     free(addresses);
 
-    printf("Execucao concluida. Saida em correct.txt\n");
-    printf("Page faults: %lu | TLB hits: %lu | TLB misses: %lu\n",
-           page_faults, tlb_hits, tlb_misses);
+    FILE *r = fopen("correct.txt", "r");
+    if (r) {
+        char buf[4096];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof(buf), r)) > 0)
+            fwrite(buf, 1, n, stdout);
+        fclose(r);
+    }
     return 0;
 }
